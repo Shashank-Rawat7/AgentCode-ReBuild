@@ -1,11 +1,11 @@
 from langchain_groq import ChatGroq
-from langchain.schema import HumanMessage, AIMessage
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import (
+from langchain_core.messages import HumanMessage, AIMessage
+
+from langchain_core.prompts import (
     ChatPromptTemplate,
     SystemMessagePromptTemplate,
     HumanMessagePromptTemplate,
-    PromptTemplate
+    PromptTemplate,
 )
 import os
 from dotenv import load_dotenv
@@ -17,7 +17,7 @@ load_dotenv()
 llm = ChatGroq(
     groq_api_key=os.getenv("GROQ_API_KEY"),
     
-    model="meta-llama/llama-4-maverick-17b-128e-instruct",
+    model="openai/gpt-oss-120b",
     temperature=0,
     max_tokens=None,
     timeout=None,
@@ -25,7 +25,7 @@ llm = ChatGroq(
 )
 
 # --- Memory Setup ---
-memory = ConversationBufferMemory(return_messages=True)
+memory: list = []
 
 # --- Prompt Template Setup ---
 system_template = (
@@ -58,7 +58,7 @@ standalone_question_prompt = PromptTemplate(
 
 def get_chat_history_as_text():
     """Converts memory's chat history to a plain text format for the prompt."""
-    history = memory.chat_memory.messages
+    history = memory
     lines = []
     for msg in history:
         if isinstance(msg, HumanMessage):
@@ -91,7 +91,7 @@ def is_code_action_request(user_message: str) -> bool:
 # --- Chat Function with Memory and Standalone Question Rephrasing ---
 def chat_with_memory(user_message: str, custom_instructions: str = "", rephrase: bool = False):
     # Optionally rephrase the user message to a standalone question
-    if rephrase and memory.chat_memory.messages:
+    if rephrase and memory:
         user_message = rephrase_to_standalone(user_message)
 
     # Build the prompt for this turn
@@ -100,15 +100,15 @@ def chat_with_memory(user_message: str, custom_instructions: str = "", rephrase:
         user_input=user_message
     )
     # Add previous conversation history (excluding the current user message)
-    history = memory.chat_memory.messages
+    history = list(memory)
     # Combine history and current prompt
     full_messages = history + messages
 
     # Get LLM response
     response = llm.invoke(full_messages)
     # Update memory with user and AI messages
-    memory.chat_memory.add_message(HumanMessage(content=user_message))
-    memory.chat_memory.add_message(AIMessage(content=response.content))
+    memory.append(HumanMessage(content=user_message))
+    memory.append(AIMessage(content=response.content))
     return response.content
 
 def chat_with_memory_with_confirmation(user_message: str, custom_instructions: str = "", rephrase: bool = False):
