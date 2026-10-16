@@ -2,7 +2,7 @@
 import Editor from '@monaco-editor/react';
 import { useRef } from 'react';
 
-export default function CodeEditor({ language, code, onCodeChange, onRun, children, onCursorChange }) {
+export default function CodeEditor({ language, code, onCodeChange, onCursorChange }) {
   const editorRef = useRef(null);
 
   return (

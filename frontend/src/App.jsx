@@ -54,10 +54,6 @@ function App() {
   const MIN_CENTER = 280;
   const splitSizes = [16, 68, 16];
 
-  const handleCodeChange = (val) => {
-    setCode(val);
-  };
-
   const handleLanguageChange = (newLang) => {
     if (!code.trim() || code === CODE_SNIPPETS[language]) {
       setCode(CODE_SNIPPETS[newLang] || '');
