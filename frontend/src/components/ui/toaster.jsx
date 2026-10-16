@@ -5,7 +5,6 @@ import {
   Portal,
   Spinner,
   Stack,
-  useToast,
 } from '@chakra-ui/react'
 
 const { ToastContainer, toast } = createStandaloneToast()

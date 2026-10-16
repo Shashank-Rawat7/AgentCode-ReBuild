@@ -7,8 +7,6 @@ export default function FileNode({ node, fetchChildren, onFileOpen }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showActions, setShowActions] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [newName, setNewName] = useState(node.name);
 
   const buttonStyle = {
     padding: '4px 8px',
@@ -153,7 +151,7 @@ export default function FileNode({ node, fetchChildren, onFileOpen }) {
 
       {isOpen && node.type === 'folder' && (
         <div>
-          {children.map((child, idx) => (
+          {children.map((child) => (
             <FileNode
               key={child.fullPath}
               node={{

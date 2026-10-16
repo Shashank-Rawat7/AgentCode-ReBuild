@@ -1,10 +1,8 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import FileNode from './FileNode.jsx';
 import { useEffect } from 'react';
 
 export default function FileExplorer({ onFileOpen, refreshKey }) {
-  const queryClient = useQueryClient();
-
   console.log("refreshKey", refreshKey);  
 
   // Fetch the root directory

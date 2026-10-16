@@ -1,6 +1,6 @@
 'use client'
 
-import { IconButton, useColorMode, useColorModeValue } from '@chakra-ui/react'
+import { IconButton, useColorMode } from '@chakra-ui/react'
 import * as React from 'react'
 import { LuMoon, LuSun } from 'react-icons/lu'
 
