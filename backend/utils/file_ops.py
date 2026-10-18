@@ -1,29 +1,56 @@
 import os
 import ast
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 import shutil
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 router = APIRouter()
+
 
 class PathRequest(BaseModel):
     path: str
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../codebase'))
+
+# --- Workspace confinement ---------------------------------------------------
+# Every file operation (UI endpoints AND agent helpers) must resolve its path
+# through resolve_in_workspace(), so there is a single place where the
+# "stay inside codebase/" rule is enforced.
+WORKSPACE = (Path(__file__).resolve().parents[2] / "codebase").resolve()
 
 
-def safe_join(base, *paths):
-    # Prevent path traversal attacks
-    final_path = os.path.abspath(os.path.join(base, *paths))
-    if not final_path.startswith(base):
-        raise HTTPException(status_code=403, detail="Access denied")
-    return final_path
+class PathOutsideWorkspace(ValueError):
+    """Raised when a requested path resolves outside the workspace."""
 
+
+def resolve_in_workspace(rel_path: str) -> Path:
+    # resolve() collapses ".." and follows symlinks; an absolute rel_path
+    # replaces WORKSPACE entirely and is then rejected by the check below.
+    candidate = (WORKSPACE / rel_path).resolve()
+    # Compare whole path components (not string prefixes), so a sibling
+    # folder such as "codebase_secrets" is not treated as inside "codebase".
+    if candidate != WORKSPACE and WORKSPACE not in candidate.parents:
+        raise PathOutsideWorkspace(f"Path is outside the workspace: {rel_path}")
+    return candidate
+
+
+def _http_error(exc: Exception) -> HTTPException:
+    # Keep deliberate HTTP errors (e.g. 404) as they are, map confinement
+    # violations to 403, and keep the previous 400 for everything else.
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, PathOutsideWorkspace):
+        return HTTPException(status_code=403, detail="Access denied")
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+# --- UI endpoints -------------------------------------------------------------
 @router.get("/fs/list")
 def list_dir(path: str = ""):
     try:
-        abs_path = safe_join(BASE_DIR, path)
+        abs_path = resolve_in_workspace(path)
         items = []
         for name in os.listdir(abs_path):
             full_path = os.path.join(abs_path, name)
@@ -33,52 +60,55 @@ def list_dir(path: str = ""):
             })
         return items
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _http_error(e)
 
 @router.post("/fs/create_folder")
 def create_folder(req: PathRequest):
     try:
-        abs_path = safe_join(BASE_DIR, req.path)
+        abs_path = resolve_in_workspace(req.path)
         os.makedirs(abs_path, exist_ok=True)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _http_error(e)
 
 @router.post("/fs/create_file")
 def create_file(req: PathRequest):
     try:
-        abs_path = safe_join(BASE_DIR, req.path)
-        open(abs_path, "w").close()
+        abs_path = resolve_in_workspace(req.path)
+        # "x" = exclusive create: fails instead of emptying an existing file.
+        open(abs_path, "x").close()
         return {"success": True}
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="File already exists")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _http_error(e)
 
 @router.post("/fs/delete")
 def delete_path(req: PathRequest):
     try:
-        abs_path = safe_join(BASE_DIR, req.path)
+        abs_path = resolve_in_workspace(req.path)
+        if abs_path == WORKSPACE:
+            raise HTTPException(status_code=400, detail="Cannot delete the workspace root")
         if os.path.isdir(abs_path):
             shutil.rmtree(abs_path)
         else:
             os.remove(abs_path)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _http_error(e)
 
 
-
-CODEBASE_DIR = os.path.join(os.path.dirname(__file__), '../../codebase')
-
+# --- Agent helpers (used by agents/planner.py and agents/developer.py) -------
 def list_code_files():
-    return [f for f in os.listdir(CODEBASE_DIR) if os.path.isfile(os.path.join(CODEBASE_DIR, f))]
+    return [f for f in os.listdir(WORKSPACE) if os.path.isfile(os.path.join(WORKSPACE, f))]
 
 def read_code_file(filename: str) -> list[str]:
-    path = os.path.join(CODEBASE_DIR, filename)
+    path = resolve_in_workspace(filename)
     with open(path, 'r', encoding='utf-8') as f:
         return f.readlines()
 
 def write_code_file(filename: str, lines: list[str]):
-    path = os.path.join(CODEBASE_DIR, filename)
+    path = resolve_in_workspace(filename)
     with open(path, 'w', encoding='utf-8') as f:
         f.writelines(lines)
 
@@ -100,9 +130,10 @@ def code_to_ast_string(code: str) -> str:
         return f"Could not parse AST: {e}"
 
 def delete_code_file(filename: str):
-    path = os.path.join(CODEBASE_DIR, filename)
+    path = resolve_in_workspace(filename)
     if os.path.exists(path):
         os.remove(path)
+
 
 class RenameRequest(BaseModel):
     old_path: str
@@ -111,23 +142,25 @@ class RenameRequest(BaseModel):
 @router.post("/fs/rename")
 def rename_path(req: RenameRequest):
     try:
-        abs_old = safe_join(BASE_DIR, req.old_path)
-        abs_new = safe_join(BASE_DIR, req.new_path)
+        abs_old = resolve_in_workspace(req.old_path)
+        abs_new = resolve_in_workspace(req.new_path)
+        if WORKSPACE in (abs_old, abs_new):
+            raise HTTPException(status_code=400, detail="Cannot rename the workspace root")
         os.rename(abs_old, abs_new)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _http_error(e)
 
 @router.get("/fs/read")
 def read_file(path: str):
     try:
-        abs_path = safe_join(BASE_DIR, path)
+        abs_path = resolve_in_workspace(path)
         if not os.path.isfile(abs_path):
             raise HTTPException(status_code=404, detail="File not found")
         with open(abs_path, "r", encoding="utf-8") as f:
             return PlainTextResponse(f.read())
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _http_error(e)
 
 class SaveFileRequest(BaseModel):
     path: str
@@ -136,9 +169,9 @@ class SaveFileRequest(BaseModel):
 @router.post("/fs/save")
 def save_file(req: SaveFileRequest):
     try:
-        abs_path = safe_join(BASE_DIR, req.path)
+        abs_path = resolve_in_workspace(req.path)
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(req.content)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _http_error(e)
