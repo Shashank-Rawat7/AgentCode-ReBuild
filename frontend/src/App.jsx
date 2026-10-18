@@ -62,6 +62,11 @@ function App() {
   };
 
   const current = openFiles.find(f => f.path === activeFile);
+  useEffect(() => {
+  if (activeFile) {
+    setLanguage(detectLanguageFromFilename(activeFile));
+  }
+}, [activeFile]);
 
   // --- Manual Save Function ---
   const handleManualSave = async () => {
@@ -101,13 +106,36 @@ function App() {
     if (!current) return;
     try {
       console.log('Running with:', { language, version: LANGUAGE_VERSIONS[language], code: current.code });
-      const response = await axios.post('https://emkc.org/api/v2/piston/execute', {
+      const response = await axios.post('http://127.0.0.1:8000/execute', {
         language: language,
         version: LANGUAGE_VERSIONS[language],
-        files: [{ content: current.code }],
+        files: [{
+          name: current.name || 'main.py',
+          content: current.code,
+        }],
       });
-      const result = response.data.run;
-      setOutput((result.output || '').split('\n'));
+      const { compile, run } = response.data;
+
+      if (compile && compile.code !== 0) {
+        const compileOutput = [
+          compile.stderr,
+          compile.stdout,
+          compile.message,
+        ]
+          .filter(Boolean)
+          .join('\n')
+          .trim();
+
+        setOutput(
+          (compileOutput || 'Compilation failed without diagnostic output.')
+            .split('\n')
+        );
+        return;
+      }
+
+      const result = run;
+      setOutput((result?.output || result?.stderr || '').split('\n'));
+
     } catch (err) {
       setOutput([
         'Error running code:',
@@ -130,13 +158,6 @@ function App() {
     setActiveFile(filePath);
     setLanguage(detectLanguageFromFilename(fileName));
   };
-
-  useEffect(() => {
-    if (current) {
-      setLanguage(detectLanguageFromFilename(current.name));
-    }
-    // eslint-disable-next-line
-  }, [current]);
 
   // --- Refresh File Explorer and Open Files ---
   const refreshFilesAndEditor = async () => {
@@ -185,7 +206,10 @@ function App() {
                     alignItems: 'center',
                     height:'2rem'
                   }}
-                  onClick={() => setActiveFile(f.path)}
+                  onClick={() => {
+                      setActiveFile(f.path);
+                      setLanguage(detectLanguageFromFilename(f.name));
+                    }}
                 >
                   {f.name}
                   <span

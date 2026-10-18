@@ -1,3 +1,6 @@
+import httpx
+from fastapi import HTTPException
+from pydantic import Field
 from fastapi import FastAPI, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -21,6 +24,66 @@ app.add_middleware(
 
 
 app.include_router(file_ops_router)
+PISTON_EXECUTE_URL = "http://127.0.0.1:2000/api/v2/execute"
+
+ALLOWED_RUNTIMES = {
+    "python": {"3.12.0"},
+    "javascript": {"18.15.0"},
+    "typescript": {"5.0.3"},
+    "java": {"15.0.2"},
+    "csharp": {"6.12.0"},
+    "c": {"10.2.0"},
+    "cpp": {"10.2.0"},
+}
+
+class ExecuteFile(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    content: str = Field(max_length=100_000)
+
+
+class ExecuteRequest(BaseModel):
+    language: str = Field(min_length=1, max_length=50)
+    version: str = Field(min_length=1, max_length=50)
+    files: list[ExecuteFile] = Field(min_length=1, max_length=10)
+
+
+@app.post("/execute")
+async def execute_code(req: ExecuteRequest):
+    if req.language not in ALLOWED_RUNTIMES:
+        raise HTTPException(status_code=400, detail="Unsupported language")
+
+    if req.version not in ALLOWED_RUNTIMES[req.language]:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported version for this language",
+        )
+    payload = req.model_dump()
+
+    try:
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            response = await client.post(PISTON_EXECUTE_URL, json=payload)
+            response.raise_for_status()
+            return response.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Piston execution request timed out")
+    except httpx.HTTPStatusError as exc:
+        try:
+            piston_error = exc.response.json()
+        except ValueError:
+            piston_error = {}
+
+        detail = piston_error.get("message") or piston_error.get("error")
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Piston rejected the execution request",
+                "piston_status": exc.response.status_code,
+                "piston_error": str(detail)[:500] if detail else None,
+            },
+        )
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Local Piston service is unavailable")
 
 class ChatRequest(BaseModel): 
     message: str
