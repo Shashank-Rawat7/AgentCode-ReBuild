@@ -7,7 +7,7 @@ import logging
 import os
 from typing import List, Optional, TypedDict
 from pydantic import BaseModel, Field, ValidationError
-from models.groq_llm import chat
+from models.groq_llm import chat, EmptyResponseError
 from utils.file_ops import list_code_files, read_code_file
 from langgraph.graph import StateGraph, END
 import time
@@ -103,12 +103,21 @@ def generate_search_query(state: PlannerState) -> PlannerState:
         f"Do NOT include explanations, just the query or queries. do not mention any year\n\n "
         f"Enhanced Task:\n{state['enhanced_task']}\n"
     )
-    query = chat(prompt).strip()
+    try:
+        query = chat(prompt).strip()
+    except EmptyResponseError as e:
+        # The web search is optional context: an empty model answer means "no query",
+        # so planning continues without external search. Other LLM errors still propagate.
+        logger.warning(f"No search query returned ({e}); continuing without external search")
+        return {"search_query": ""}
     logger.info(f"Generated search query: {query}")
     return {"search_query": query}
 
 def decide_search_source(state: PlannerState) -> PlannerState:
     logger.info("[Node] decide_search_source")
+    if not state.get("search_query"):
+        logger.info("No search query: skipping external search")
+        return {"use_external": False}
     prompt = (
         f"Given the task and codebase context, should we fetch external docs?\n"
         f"Task: {state['task']}\nCodebase: {state['codebase_summary']}\n"
