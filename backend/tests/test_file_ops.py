@@ -208,3 +208,21 @@ def test_resolve_rejects_windows_junction_that_points_outside(workspace, tmp_pat
 
     with pytest.raises(PathOutsideWorkspace):
         resolve_in_workspace("junction/secret.txt")
+
+
+# --- Agent edits must not save broken Python (regression for T2) ---------------
+def test_agent_edit_that_breaks_python_is_rejected_and_file_unchanged(workspace):
+    # Replays the exact T2 step: inserting a bare "def multiply(a, b):" after the
+    # last line leaves a function with no body (IndentationError).
+    from agents.developer import ToolStep, run_code_update
+
+    demo = workspace / "agent_demo.py"
+    demo.write_text("def add(a, b):\n    return a + b\n\nprint(add(2, 3))\n", encoding="utf-8")
+    before = demo.read_bytes()
+
+    step = ToolStep(file="agent_demo.py", tool="apply_change",
+                    args={"action": "insert", "line": 4, "new_code": "def multiply(a, b):"})
+    result = run_code_update({"current_step": step, "logs": []})
+
+    assert result["logs"][-1].startswith("[ERROR] apply_change on agent_demo.py failed")
+    assert demo.read_bytes() == before  # the original file was not overwritten
