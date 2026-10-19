@@ -26,6 +26,10 @@ class LLMError(RuntimeError):
     """Raised when Gemini fails or returns no usable text."""
 
 
+class EmptyResponseError(LLMError):
+    """Gemini answered (HTTP 200) but returned no usable text, even after the retry."""
+
+
 def _describe_empty_response(response) -> str:
     candidates = getattr(response, "candidates", None) or []
     finish_reasons = [str(getattr(c, "finish_reason", None)) for c in candidates]
@@ -80,7 +84,7 @@ def chat(prompt: str) -> str:
             text = response.text
             if text and text.strip():
                 return text.strip()
-            last_error = LLMError(_describe_empty_response(response))
+            last_error = EmptyResponseError(_describe_empty_response(response))
             retryable = True
 
         logger.warning("%s (attempt %d/%d)", last_error, attempt, MAX_ATTEMPTS)

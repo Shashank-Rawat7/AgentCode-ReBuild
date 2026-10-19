@@ -145,3 +145,28 @@ def test_run_task_without_task_returns_400(client, monkeypatch):
     response = client.post("/run-task", json={})
 
     assert response.status_code == 400
+
+
+# --- planner: optional search-query step (regression for T2b) ------------------
+def test_empty_search_query_is_skipped_but_api_errors_still_fail(monkeypatch):
+    from agents import planner
+    from models.groq_llm import EmptyResponseError, LLMError
+
+    # 1. An empty Gemini answer for the optional search query means "no web search".
+    def empty(prompt):
+        raise EmptyResponseError("Gemini returned no text (finish_reason=['FinishReason.STOP'])")
+    monkeypatch.setattr(planner, "chat", empty)
+    assert planner.generate_search_query({"enhanced_task": "edit agent_demo.py"}) == {"search_query": ""}
+
+    # 2. With no query, the search decision is skipped without another LLM call.
+    def must_not_call(prompt):
+        pytest.fail("decide_search_source must not call the LLM when there is no query")
+    monkeypatch.setattr(planner, "chat", must_not_call)
+    assert planner.decide_search_source({"search_query": "", "task": "t", "codebase_summary": ""}) == {"use_external": False}
+
+    # 3. A genuine LLM failure (API error, rate limit, timeout) is not hidden.
+    def api_error(prompt):
+        raise LLMError("Gemini API error 503: unavailable")
+    monkeypatch.setattr(planner, "chat", api_error)
+    with pytest.raises(LLMError, match="503"):
+        planner.generate_search_query({"enhanced_task": "edit agent_demo.py"})
