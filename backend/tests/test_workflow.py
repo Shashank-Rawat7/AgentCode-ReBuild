@@ -1,0 +1,147 @@
+import logging
+
+import pytest
+from fastapi.testclient import TestClient
+
+import main
+from langgraph_app import graph as wf
+
+
+def run_workflow(task="create a file"):
+    return wf.setup_graph().invoke({"task": task})
+
+
+def developer_must_not_run(steps):
+    pytest.fail("developer_node must not run when planning failed")
+
+
+# --- graph: planner failures ---------------------------------------------------
+def test_planner_exception_is_logged_with_traceback_and_reported(monkeypatch, caplog):
+    def boom(task):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(wf, "planner_agent", boom)
+    monkeypatch.setattr(wf, "developer_agent", developer_must_not_run)
+
+    with caplog.at_level(logging.ERROR, logger=wf.logger.name):
+        result = run_workflow()
+
+    assert result["status"] == "error"
+    assert result["stage"] == "planner"
+    assert result["error"] == "RuntimeError: boom"  # original error, not "No steps found"
+    records = [r for r in caplog.records if "Planner failed" in r.getMessage()]
+    assert records, "planner exception was not logged"
+    assert records[0].exc_info is not None  # traceback attached
+
+
+def test_planner_with_no_steps_is_reported_and_developer_not_run(monkeypatch):
+    monkeypatch.setattr(wf, "planner_agent", lambda task: [])
+    monkeypatch.setattr(wf, "developer_agent", developer_must_not_run)
+
+    result = run_workflow()
+
+    assert result["status"] == "error"
+    assert result["stage"] == "planner"
+    assert result["error"] == "Planner produced no steps"
+
+
+# --- graph: developer outcomes ----------------------------------------------------
+STEPS = [{"file": "a.py", "tool": "write", "args": {"content": "x"}}]
+
+
+def test_failed_developer_step_is_reported(monkeypatch):
+    monkeypatch.setattr(wf, "planner_agent", lambda task: STEPS)
+    monkeypatch.setattr(
+        wf, "developer_agent",
+        lambda steps: ["[ERROR] write on a.py failed: Path is outside the workspace: a.py"],
+    )
+
+    result = run_workflow()
+
+    assert result["status"] == "error"
+    assert result["stage"] == "developer"
+    assert "1 of 1 step(s) failed" in result["error"]
+    assert "a.py" in result["error"]
+
+
+def test_developer_exception_is_reported(monkeypatch):
+    def crash(steps):
+        raise ValueError("graph crashed")
+
+    monkeypatch.setattr(wf, "planner_agent", lambda task: STEPS)
+    monkeypatch.setattr(wf, "developer_agent", crash)
+
+    result = run_workflow()
+
+    assert result["status"] == "error"
+    assert result["stage"] == "developer"
+    assert result["error"] == "ValueError: graph crashed"
+
+
+def test_successful_workflow_is_complete(monkeypatch):
+    monkeypatch.setattr(wf, "planner_agent", lambda task: STEPS)
+    monkeypatch.setattr(wf, "developer_agent", lambda steps: ["[WRITE] a.py written"])
+
+    result = run_workflow()
+
+    assert result["status"] == "development_complete"
+    assert result["code"] == ["[WRITE] a.py written"]
+    assert "error" not in result
+
+
+# --- /run-task endpoint (workflow replaced by a fake; no LLM calls) -----------
+class FakeWorkflow:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+
+    def invoke(self, state):
+        if self.error:
+            raise self.error
+        return self.result
+
+
+@pytest.fixture
+def client():
+    return TestClient(main.app)
+
+
+def test_run_task_reports_planner_failure_as_500(client, monkeypatch):
+    failed = {"status": "error", "stage": "planner", "error": "LLMError: Gemini returned no text"}
+    monkeypatch.setattr(main, "setup_graph", lambda: FakeWorkflow(result=failed))
+
+    response = client.post("/run-task", json={"task": "create a file"})
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["stage"] == "planner"
+    assert body["error"] == "LLMError: Gemini returned no text"
+
+
+def test_run_task_reports_success_with_steps_and_logs(client, monkeypatch):
+    done = {"status": "development_complete", "steps": STEPS, "code": ["[WRITE] a.py written"]}
+    monkeypatch.setattr(main, "setup_graph", lambda: FakeWorkflow(result=done))
+
+    response = client.post("/run-task", json={"task": "create a file"})
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "success", "steps": STEPS, "logs": ["[WRITE] a.py written"]}
+
+
+def test_run_task_reports_unexpected_exception_as_500(client, monkeypatch):
+    monkeypatch.setattr(main, "setup_graph", lambda: FakeWorkflow(error=ValueError("kaput")))
+
+    response = client.post("/run-task", json={"task": "create a file"})
+
+    assert response.status_code == 500
+    assert response.json()["stage"] == "workflow"
+    assert response.json()["error"] == "ValueError: kaput"
+
+
+def test_run_task_without_task_returns_400(client, monkeypatch):
+    monkeypatch.setattr(main, "setup_graph", lambda: pytest.fail("workflow must not run"))
+
+    response = client.post("/run-task", json={})
+
+    assert response.status_code == 400
