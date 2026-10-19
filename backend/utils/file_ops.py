@@ -109,6 +109,8 @@ def read_code_file(filename: str) -> list[str]:
 
 def write_code_file(filename: str, lines: list[str]):
     path = resolve_in_workspace(filename)
+    if path.suffix == ".py":
+        ast.parse("".join(lines), filename=filename)  # refuse to save invalid Python
     with open(path, 'w', encoding='utf-8') as f:
         f.writelines(lines)
 
