@@ -9,6 +9,10 @@ from langgraph_app.graph import setup_graph
 from utils.file_ops import router as file_ops_router
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI()
@@ -107,9 +111,28 @@ async def run_task_endpoint(data: dict = Body(...)):
     print("run-task called with:", data)
     task = data.get("task")
     if not task:
-        return {"error": "No task provided"}
-    workflow = setup_graph()
-    result = workflow.invoke({"task": task})
-    return {
-        "status": "success",
-    }
+        raise HTTPException(status_code=400, detail="No task provided")
+    try:
+        workflow = setup_graph()
+        result = workflow.invoke({"task": task})
+    except Exception as e:
+        logger.exception("Workflow failed: %s", e)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "stage": "workflow", "error": f"{type(e).__name__}: {e}", "logs": []},
+        )
+
+    logs = result.get("code") or []
+    if result.get("status") == "development_complete":
+        return {"status": "success", "steps": result.get("steps", []), "logs": logs}
+
+    # Planner or developer reported a failure: surface it instead of claiming success
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "stage": result.get("stage", "unknown"),
+            "error": result.get("error") or "Workflow did not complete",
+            "logs": logs,
+        },
+    )
