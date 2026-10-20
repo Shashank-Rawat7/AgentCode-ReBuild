@@ -40,16 +40,21 @@ def pick_next_step(state: DevState) -> DevState:
     return {"current_step": step}
 
 # --- Step: Validate/fix step via LLM ---
+def _target_file_context(filename: str) -> str:
+    """Current contents of the step's target file, read through the workspace-confined helper."""
+    try:
+        return "".join(read_code_file(filename))
+    except FileNotFoundError:
+        return "(file does not exist yet)"
+    except Exception:  # outside the workspace, a directory, or not UTF-8 text
+        return "(could not be read)"
+
 def validate_step_with_llm(state: DevState) -> DevState:
     step = state["current_step"]
-    codebase_files = list_code_files()
-    codebase_summary = ""
-    for f in codebase_files:
-        try:
-            code = "".join(read_code_file(f))
-            codebase_summary += f"\n---\nFilename: {f}\n{code}"
-        except:
-            continue
+    # Only the target file's contents are sent; other files are listed by name.
+    # The planner (generate_steps) already saw the whole codebase.
+    target_context = _target_file_context(step.file)
+    other_files = [f for f in list_code_files() if f != step.file]
 
     prompt = f"""
 You are a code step validator helping an AI developer execute file operations on a local codebase.
@@ -59,7 +64,7 @@ Only use one of these tools:
 1. **write**
    - Purpose: Create a new file, or modify an existing file by rewriting it.
    - Args: {{ "content": "<complete file contents after the change>" }}
-   - To change an existing file, start from its current contents in the codebase context below, apply every requested change, and return the complete updated file. Keep everything the task does not ask to change.
+   - To change an existing file, start from its current contents shown below, apply every requested change, and return the complete updated file. Keep everything the task does not ask to change.
 
 2. **read**
    - Purpose: Read a file and return its line count.
@@ -79,7 +84,7 @@ Only use one of these tools:
 5. **llm_modify**
    - Not available. If the planned step uses llm_modify, return a write step with the complete updated file contents instead.
 
-Given the codebase context and a proposed ToolStep (file, tool, args), correct and return the step.
+Given the target file's current contents and a proposed ToolStep (file, tool, args), correct and return the step.
 
 Only return the corrected ToolStep as a **pure JSON object** (no comments, no Markdown, no Python dicts):
 
@@ -93,8 +98,10 @@ Only return the corrected ToolStep as a **pure JSON object** (no comments, no Ma
   }}
 }}
 
-Here is the codebase context:
-{codebase_summary}
+Other files in the codebase (names only): {", ".join(other_files) or "(none)"}
+
+Current contents of {step.file}:
+{target_context}
 
 Planned step:
 {step.model_dump()}

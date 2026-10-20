@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import FileNode from './FileNode.jsx';
 import { useEffect } from 'react';
 
-export default function FileExplorer({ onFileOpen, refreshKey }) {
+export default function FileExplorer({ onFileOpen, refreshKey, getRenameBlockedMessage }) {
   console.log("refreshKey", refreshKey);  
 
   // Fetch the root directory
@@ -60,6 +60,7 @@ export default function FileExplorer({ onFileOpen, refreshKey }) {
           node={node}
           fetchChildren={fetchChildren}
           onFileOpen={(path, name) => onFileOpen(path, name)}
+          getRenameBlockedMessage={getRenameBlockedMessage}
           refreshTree={refreshTree}
         />
       ))}

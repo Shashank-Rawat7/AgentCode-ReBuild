@@ -5,6 +5,7 @@ import Output from './components/Output';
 import FileExplorer from './components/FileExplorer';
 import AIChat from './components/AIChat';
 import { LANGUAGE_VERSIONS, CODE_SNIPPETS } from './constants';
+import { hasUnsavedChanges, renameBlockedMessage } from './utils/unsavedChanges';
 import axios from 'axios';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import './index.css'
@@ -38,7 +39,7 @@ function detectLanguageFromFilename(filename) {
 }
 
 function App() {
-  const [openFiles, setOpenFiles] = useState([]); // [{ path, name, code }]
+  const [openFiles, setOpenFiles] = useState([]); // [{ path, name, code, savedCode }]
   const [activeFile, setActiveFile] = useState(null); // path string
   const [code, setCode] = useState(''); // file content
   const [language, setLanguage] = useState('python');
@@ -72,13 +73,18 @@ function App() {
   const handleManualSave = async () => {
     if (!current) return;
     setSaveStatus('saving');
+    const { path: savedPath, code: savedContent } = current;
     try {
       const res = await fetch('http://localhost:8000/fs/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: current.path, content: current.code }),
+        body: JSON.stringify({ path: savedPath, content: savedContent }),
       });
       if (res.ok) {
+        // Record what is now on disk, so the tab is no longer marked as unsaved.
+        setOpenFiles(files =>
+          files.map(f => (f.path === savedPath ? { ...f, savedCode: savedContent } : f))
+        );
         setSaveStatus('saved');
         setTimeout(() => setSaveStatus(''), 1200);
       } else {
@@ -154,7 +160,7 @@ function App() {
     }
     const res = await fetch(`http://localhost:8000/fs/read?path=${encodeURIComponent(filePath)}`);
     const code = res.ok ? await res.text() : '// Error loading file';
-    setOpenFiles(files => [...files, { path: filePath, name: fileName, code }]);
+    setOpenFiles(files => [...files, { path: filePath, name: fileName, code, savedCode: code }]);
     setActiveFile(filePath);
     setLanguage(detectLanguageFromFilename(fileName));
   };
@@ -166,7 +172,7 @@ function App() {
       const updatedFiles = await Promise.all(openFilesRef.current.map(async (f) => {
         const res = await fetch(`http://localhost:8000/fs/read?path=${encodeURIComponent(f.path)}`);
         const code = res.ok ? await res.text() : '// Error loading file';
-        return { ...f, code };
+        return { ...f, code, savedCode: code };
       }));
       setOpenFiles(updatedFiles);
     }
@@ -189,7 +195,11 @@ function App() {
         gutterSize={6}
       >
         <div className="ide-sidebar-left">
-          <FileExplorer onFileOpen={openFile} refreshKey={refreshKey} />
+          <FileExplorer
+            onFileOpen={openFile}
+            refreshKey={refreshKey}
+            getRenameBlockedMessage={() => renameBlockedMessage(openFilesRef.current)}
+          />
         </div>
         <div className="ide-center">
             <div style={{ display: 'flex', background: '#23272f', borderBottom: '1px solid #222' }}>
@@ -212,6 +222,9 @@ function App() {
                     }}
                 >
                   {f.name}
+                  {hasUnsavedChanges(f) && (
+                    <span title="Unsaved changes" style={{ marginLeft: 6, color: '#facc15' }}>●</span>
+                  )}
                   <span
                     style={{ marginLeft: 8, color: '#aaa', cursor: 'pointer' }}
                     onClick={e => {

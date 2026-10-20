@@ -1,6 +1,6 @@
 import { useState,useEffect  } from 'react';
 
-export default function FileNode({ node, fetchChildren, onFileOpen }) {
+export default function FileNode({ node, fetchChildren, onFileOpen, getRenameBlockedMessage }) {
   const [isOpen, setIsOpen] = useState(node.isOpen || false);
   const [children, setChildren] = useState(node.children || []);
   const [loaded, setLoaded] = useState(!!node.children);
@@ -77,6 +77,12 @@ export default function FileNode({ node, fetchChildren, onFileOpen }) {
   };
 
   const handleRename = () => {
+    // The page reloads after a rename, which would discard unsaved editor content.
+    const blocked = getRenameBlockedMessage && getRenameBlockedMessage();
+    if (blocked) {
+      window.alert(blocked);
+      return;
+    }
     const basePath = node.fullPath.substring(0, node.fullPath.lastIndexOf('/'));
     const newName = prompt('Enter new name:', node.name);
     if (!newName || newName === node.name) return;
@@ -160,6 +166,7 @@ export default function FileNode({ node, fetchChildren, onFileOpen }) {
               }}
               fetchChildren={fetchChildren}
               onFileOpen={onFileOpen}
+              getRenameBlockedMessage={getRenameBlockedMessage}
             />
           ))}
         </div>
