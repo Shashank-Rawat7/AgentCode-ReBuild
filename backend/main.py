@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agents.chat_agent import chat_with_memory, memory ,chat_with_memory_with_confirmation # Import your chat agent
 from langgraph_app.graph import setup_graph
+from models.groq_llm import start_task_usage, finish_task_usage
 from utils.file_ops import router as file_ops_router
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -112,14 +113,24 @@ async def run_task_endpoint(data: dict = Body(...)):
     task = data.get("task")
     if not task:
         raise HTTPException(status_code=400, detail="No task provided")
+    usage_token = start_task_usage()
     try:
         workflow = setup_graph()
-        result = workflow.invoke({"task": task})
+        # run_name/tags only label the run when optional LangSmith tracing is enabled
+        result = workflow.invoke({"task": task}, config={"run_name": "agentcode_task", "tags": ["run-task"]})
     except Exception as e:
         logger.exception("Workflow failed: %s", e)
         return JSONResponse(
             status_code=500,
             content={"status": "error", "stage": "workflow", "error": f"{type(e).__name__}: {e}", "logs": []},
+        )
+    finally:
+        usage = finish_task_usage(usage_token)
+        logger.info(
+            "Task LLM usage: calls=%d input_tokens=%d output_tokens=%d total_tokens=%d "
+            "(groq-reported calls=%d, locally estimated calls=%d)",
+            usage["calls"], usage["input_tokens"], usage["output_tokens"], usage["total_tokens"],
+            usage["groq_reported_calls"], usage["estimated_calls"],
         )
 
     logs = result.get("code") or []

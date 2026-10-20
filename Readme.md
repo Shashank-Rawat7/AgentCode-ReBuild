@@ -29,8 +29,8 @@ Browser (React + Vite, Chakra UI, Monaco)
   ├─ chat ──────────► POST /chat       → chat model (Groq, openai/gpt-oss-120b via langchain-groq)
   │
   ├─ Execute Work ──► POST /run-task   → LangGraph workflow
-  │                                        planner   (Gemini 2.5 Flash, google-genai SDK; optional Tavily web search)
-  │                                        developer (Gemini 2.5 Flash; checks each step, then runs it)
+  │                                        planner   (Groq model via langchain-groq; optional Tavily web search)
+  │                                        developer (Groq model; checks each step, then runs it)
   │                                        → file operations confined to codebase/
   │
   ├─ explorer ──────► /fs/*            → list, read, create, rename, delete, save inside codebase/
@@ -48,7 +48,7 @@ The backend is FastAPI. It never executes submitted code itself: `/execute` chec
 - Python 3.12 (development and tests used 3.12.4)
 - Node.js 18 or newer, with npm (the frontend uses Vite 5)
 - Docker, to run Piston locally
-- API keys: Google Gemini and Groq (Tavily is optional)
+- A Groq API key (Tavily is optional)
 
 ### 1. Self-hosted Piston (required for Run)
 The public Piston API is not used. Run your own Piston container by following the [Piston README](https://github.com/engineer-man/piston), so that its API is reachable at `http://127.0.0.1:2000`. Then install these runtimes with Piston's package manager. The backend accepts only these exact versions:
@@ -84,8 +84,8 @@ Fill in `backend/.env`:
 
 | Variable | Used by |
 |---|---|
-| `GOOGLE_GENAI_API_KEY` | Planner and developer agents (Gemini 2.5 Flash). Required for agent tasks. |
-| `GROQ_API_KEY` | Chat panel and code-change detection. Required for chat. |
+| `GROQ_API_KEY` | Planner and developer agents, chat panel and code-change detection. Required. |
+| `GROQ_MODEL` | Model used by the planner and developer agents. Optional; defaults to `openai/gpt-oss-20b`. The chat panel keeps its own model (`openai/gpt-oss-120b`). |
 | `TAVILY_API_KEY` | Optional web search in the planner. Without it, the search returns no results and planning continues. |
 
 In the same terminal (still in `backend/`, with the virtual environment active), start the API:
@@ -109,21 +109,29 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
+### Optional: token usage and LangSmith tracing
+- **Token usage** is always logged by the backend. Each LLM call writes a line like `LLM usage purpose=generate_steps model=... input_tokens=... output_tokens=... total_tokens=... source=groq-reported`, and each `/run-task` request ends with a `Task LLM usage: calls=... total_tokens=...` summary. `source=groq-reported` means the numbers came from Groq; `source=local-estimate` (about 4 characters per token) is used only if Groq reports no usage.
+- **Rate limits (429):** the agent retries once only when Groq's suggested wait is short (`AGENTCODE_MAX_429_WAIT_SECONDS`, default 20); otherwise it fails at once with Groq's message.
+- **Prompt-size guard:** `AGENTCODE_MAX_PROMPT_TOKENS` (default `0`, disabled). When set, prompts whose local estimate exceeds it are not sent.
+- **LangSmith tracing** is off by default. To see the graph, each node's inputs and outputs, and each LLM call in [LangSmith](https://smith.langchain.com), set in `backend/.env`: `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY=<your key>` and optionally `LANGSMITH_PROJECT=agentcode`, then restart the backend. Each task appears as a run named `agentcode_task`. Traces contain prompts and file contents, so only enable tracing for code you are happy to send to LangSmith.
+
 ---
 
 ## Verification
 
-**Automated tests:** `50 passed, 1 skipped` on the merged `main`. The skipped test needs permission to create symlinks on Windows. The tests cover:
+**Automated tests:** `78 passed, 2 skipped`. One skipped test needs permission to create symlinks on Windows; the other is the optional live Groq test (below). The tests cover:
 - workspace confinement for the UI endpoints and the agent's file helpers;
 - the `/execute` proxy and its error mapping;
-- Gemini errors, timeouts and empty responses, with a bounded retry;
+- Groq API errors, timeouts and empty responses, with a bounded retry;
+- token-usage logging (Groq-reported vs estimated), per-task totals, the 429 retry rule and the optional prompt-size guard;
 - skipping the optional web search when the model returns no query;
 - workflow error reporting;
-- refusal of an agent edit that would leave broken Python.
+- refusal of an agent edit that would leave broken Python;
+- planner and developer parsing of typical model replies (fenced Python lists and JSON), through to the tool dispatcher.
 
-The model calls are replaced with test doubles, so the tests make no API calls.
+The model calls are replaced with test doubles, so these tests make no API calls. An optional live test makes one real Groq call; it is skipped unless enabled (from `backend/`, PowerShell: `$env:AGENTCODE_LIVE_GROQ = "1"; python -m pytest -q tests/test_live_groq.py`).
 
-**Manual end-to-end runs:** on Windows, with the real models and a local Piston container. Each run was a single attempt, with file hashes checked before and after:
+**Manual end-to-end runs:** on Windows, with a local Piston container. These runs used the earlier Gemini-based agent, before the switch to Groq, and have not been repeated with Groq, apart from the single Groq run below. Each run was a single attempt, with file hashes checked before and after:
 
 | Check | Result |
 |---|---|
@@ -135,15 +143,29 @@ The model calls are replaced with test doubles, so the tests make no API calls.
 
 These are single runs against a non-deterministic model: they show the paths work, not that every request will succeed. A first create run failed before the honest-reporting fix: the failure was hidden and success reported. The detailed test record, including the failed runs and evidence files, is kept in the author's project notes and is not part of this repository.
 
+**Groq live run (token-usage logging):** one UI task through the Groq-based agent, `Create a new file named usage_check.py containing print("usage check")`, succeeded and the file was written. The backend logged five LLM calls, all with `source=groq-reported`, and the per-call totals add up to the task summary:
+
+| Node | Total tokens |
+|---|---|
+| `enhance_prompt` | 307 |
+| `generate_search_query` | 495 |
+| `decide_search_source` | 200 |
+| `generate_steps` | 3,298 |
+| `validate_step_with_llm` | 3,393 |
+| **Task total** | **7,693** (6,863 input, 830 output) |
+
+This is a single run. It shows that usage logging works; it does not show any token reduction or a fix for 429 errors. The two codebase-aware calls (`generate_steps` and `validate_step_with_llm`) used most of the tokens, and the task total is close to the 8,000 tokens-per-minute limit we hit on Groq's free tier.
+
 ---
 
 ## Known limitations
 
-- **Agent results depend on the model.** Plans and edits come from Gemini, and a request can still be planned or applied incorrectly. There is no plan review before the agent edits files, and no automatic check that the result matches the request.
+- **Agent results depend on the model.** Plans and edits come from the Groq-hosted model, and a request can still be planned or applied incorrectly. There is no plan review before the agent edits files, and no automatic check that the result matches the request.
 - **The UI sends the task as an object** (`{"text": ..., "id": ...}`) instead of plain text. The planner handled it in testing, but the payload has not been cleaned up.
 - **No stdin.** The Run panel shows only the output text, not the exit code or signal.
 - **No AI autocomplete.** The editor offers Monaco's built-in, non-AI suggestions only.
 - **Execution is request/response**, not streamed: output appears when the run finishes.
+- **Groq rate limits apply.** On the free tier, a task can hit HTTP 429 (tokens per minute). The agent retries once only when Groq suggests a short wait; otherwise it reports the error. The planner and developer still send full file contents, so larger tasks are the most likely to hit the limit.
 - **Long plans can fail.** No recursion limit is configured, so LangGraph's default limits how many developer steps a single task can run.
 - **Not yet verified end to end:**
   - modifying and deleting files through the UI (verified through the API only);
@@ -159,6 +181,6 @@ These are single runs against a non-deterministic model: they show the paths wor
 
 - **Frontend:** React, Vite, Chakra UI, Monaco Editor
 - **Backend:** FastAPI, httpx, Pydantic
-- **Agents:** LangGraph (planner → developer); Gemini 2.5 Flash via the `google-genai` SDK; Groq `openai/gpt-oss-120b` via `langchain-groq` for chat
+- **Agents:** LangGraph (planner → developer); Groq via `langchain-groq`: `openai/gpt-oss-20b` by default for the agents (configurable with `GROQ_MODEL`), `openai/gpt-oss-120b` for chat
 - **Code execution:** self-hosted Piston
 - **Tests:** pytest

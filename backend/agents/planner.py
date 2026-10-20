@@ -85,8 +85,8 @@ def summarize_codebase(state: PlannerState) -> PlannerState:
 
 def enhance_prompt(state: PlannerState) -> PlannerState:
     logger.info("[Node] enhance_prompt")
+    # Only the task is sent here; the full codebase is used later, in generate_steps.
     prompt = (
-        f"You are aware of the following codebase:\n{state['codebase_summary']}\n"
         f"Enhance this task for clarity: {state['task']} Do not give any code just imrpove the task language"
         f"Just give the enhanced task nothing else no additional information"
     )
@@ -118,9 +118,10 @@ def decide_search_source(state: PlannerState) -> PlannerState:
     if not state.get("search_query"):
         logger.info("No search query: skipping external search")
         return {"use_external": False}
+    # Decided from the task text only; the full codebase is not needed for this yes/no choice.
     prompt = (
-        f"Given the task and codebase context, should we fetch external docs?\n"
-        f"Task: {state['task']}\nCodebase: {state['codebase_summary']}\n"
+        f"Given the task, should we fetch external docs?\n"
+        f"Task: {state['task']}\nEnhanced task: {state.get('enhanced_task', '')}\n"
         f"Answer with EXTERNAL or INTERNAL."
     )
     result = chat(prompt).strip().upper()
