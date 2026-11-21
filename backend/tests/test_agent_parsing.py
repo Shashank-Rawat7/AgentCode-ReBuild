@@ -180,3 +180,92 @@ def test_validator_does_not_read_files_outside_the_workspace(workspace, monkeypa
     assert "OUTSIDE_SECRET_CONTENT" not in prompts[0]
     assert "Current contents of ../outside_secret.txt:\n(could not be read)" in prompts[0]
     assert logs[0].startswith("[ERROR] read on ../outside_secret.txt failed")  # still refused by file_ops
+
+
+# --- Whole-file writes must not silently drop existing Python code ----------------
+ORIGINAL = "def add(a, b):\n    return a + b\n\nprint(add(2, 3))\n"
+
+
+def write_step(file, content):
+    return {"file": file, "tool": "write", "args": {"content": content}}
+
+
+def test_write_that_drops_an_existing_function_is_refused_and_file_unchanged(workspace, monkeypatch):
+    target = workspace / "groq_modify_test.py"
+    target.write_bytes(ORIGINAL.encode("utf-8"))
+    bad = write_step("groq_modify_test.py", "def multiply(a, b):\n    return a * b\n\nprint(multiply(2, 3))\n")
+    capture_validator(monkeypatch, json.dumps(bad))  # the validator approves the bad step
+
+    logs = developer.run_developer_subgraph([bad])
+
+    assert len(logs) == 1
+    assert logs[0].startswith("[ERROR] write on groq_modify_test.py failed")
+    assert "would remove existing definitions: add" in logs[0]
+    assert target.read_bytes() == ORIGINAL.encode("utf-8")  # byte-for-byte unchanged
+
+
+def test_additive_write_with_the_complete_file_keeps_existing_code(workspace, monkeypatch):
+    (workspace / "groq_modify_test.py").write_text(ORIGINAL, encoding="utf-8")
+    complete = ORIGINAL + "\n\ndef multiply(a, b):\n    return a * b\n\nprint(multiply(2, 3))\n"
+    step = write_step("groq_modify_test.py", complete)
+    capture_validator(monkeypatch, json.dumps(step))
+
+    logs = developer.run_developer_subgraph([step])
+
+    assert logs == ["[WRITE] groq_modify_test.py written"]
+    result = (workspace / "groq_modify_test.py").read_text(encoding="utf-8")
+    assert result == complete
+    assert "def add(a, b):" in result and "print(add(2, 3))" in result
+    assert "def multiply(a, b):" in result and "print(multiply(2, 3))" in result
+
+
+def test_rewrite_that_keeps_every_definition_is_allowed(workspace):
+    (workspace / "shapes.py").write_text("class Box:\n    pass\n\ndef area(b):\n    return 0\n", encoding="utf-8")
+    rewritten = "def area(b):\n    return b.w * b.h\n\nclass Box:\n    w = 1\n    h = 2\n"
+
+    log = developer.perform_tool_action(developer.ToolStep(**write_step("shapes.py", rewritten)))
+
+    assert log == "[WRITE] shapes.py written"
+    assert (workspace / "shapes.py").read_text(encoding="utf-8") == rewritten
+
+
+@pytest.mark.parametrize("filename,old,new", [
+    ("brand_new.py", None, "def only_new():\n    return 1\n"),          # new Python file
+    ("notes.txt", "def add(a, b): old notes\n", "completely different\n"),  # non-Python file
+    ("page.js", "function add(a, b) { return a + b; }\n", "function multiply(a, b) { return a * b; }\n"),
+])
+def test_new_and_non_python_files_are_written_as_before(workspace, filename, old, new):
+    if old is not None:
+        (workspace / filename).write_text(old, encoding="utf-8")
+
+    log = developer.perform_tool_action(developer.ToolStep(**write_step(filename, new)))
+
+    assert log == f"[WRITE] {filename} written"
+    assert (workspace / filename).read_text(encoding="utf-8") == new
+
+
+def test_planner_prompt_says_write_replaces_the_whole_file(monkeypatch):
+    seen = []
+    monkeypatch.setattr(planner, "chat", lambda prompt: seen.append(prompt) or "[]")
+
+    planner.generate_steps({"codebase_summary": "", "enhanced_task": "add multiply to calc.py"})
+
+    assert '"write" replaces the ENTIRE file' in seen[0]
+    assert "the complete updated file" in seen[0]
+
+
+def test_workflow_reports_developer_error_when_a_write_would_drop_code(workspace, monkeypatch):
+    from langgraph_app import graph as main_graph
+
+    target = workspace / "groq_modify_test.py"
+    target.write_text(ORIGINAL, encoding="utf-8")
+    bad = write_step("groq_modify_test.py", "def multiply(a, b):\n    return a * b\n")
+    monkeypatch.setattr(main_graph, "planner_agent", lambda task: [bad])
+    capture_validator(monkeypatch, "not json")  # validator keeps the planned step
+
+    result = main_graph.setup_graph().invoke({"task": "add multiply to groq_modify_test.py"})
+
+    assert result["status"] == "error"
+    assert result["stage"] == "developer"
+    assert "would remove existing definitions: add" in result["error"]
+    assert target.read_text(encoding="utf-8") == ORIGINAL

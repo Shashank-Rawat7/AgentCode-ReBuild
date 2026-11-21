@@ -152,9 +152,11 @@ Generate a python list of steps , Each step must mention:
 - "tool": one of ["read", "write", "delete", "apply_change", "llm_modify"]
 - "args": a dict of arguments for the tool (e.g., code, line number, function name, etc.)
 
+"write" replaces the ENTIRE file. To change an existing file with "write", its "content" arg must be the complete updated file, including all existing code that the task does not ask to remove.
+
 Choose the file type and language that best fits the task. If the task involves web, use .html, .js, .css as needed. If the task is for Python, use .py. If the codebase is empty, create all necessary files from scratch.
 
-Be specific: reference real files, functions, and lines. Do not use placeholders like '...' or generic names. If a file does not exist, create it. If you need to add a function or code, specify its full code. If you need to modify a line, specify the line number and the new code.
+Be specific: reference real files, functions, and lines. Do not use placeholders like '...' or generic names. If a file does not exist, create it. If you need to add a function or code to an existing file, use "write" with the complete updated file (the existing code plus the addition). If you need to modify a line, specify the line number and the new code.
 
 Output ONLY a valid Python list of steps, no explanations, no markdown, no extra text.
 

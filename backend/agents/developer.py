@@ -136,6 +136,35 @@ def log_and_feedback(state: DevState) -> DevState:
     logger.info(f"[Dev] Step completed: {step.tool} on {step.file}")
     return {}
 
+# --- Guard: a whole-file write must not silently drop existing Python code ---
+def _top_level_definitions(source: str) -> set:
+    tree = ast.parse(source)
+    return {
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+
+def _refuse_write_that_drops_definitions(filename: str, new_content: str) -> None:
+    """Raise before writing if replacing an existing .py file would remove top-level functions or classes."""
+    if not filename.endswith(".py"):
+        return
+    try:
+        old_content = "".join(read_code_file(filename))  # workspace-confined read
+    except FileNotFoundError:
+        return  # new file: nothing to lose
+    try:
+        old_definitions = _top_level_definitions(old_content)
+        new_definitions = _top_level_definitions(new_content)
+    except SyntaxError:
+        return  # nothing reliable to compare; write_code_file still refuses invalid new Python
+    removed = sorted(old_definitions - new_definitions)
+    if removed:
+        raise ValueError(
+            f"write would remove existing definitions: {', '.join(removed)} (file left unchanged)"
+        )
+
+
 # --- Tool dispatcher ---
 def perform_tool_action(step: ToolStep) -> str:
     tool = step.tool
@@ -144,6 +173,7 @@ def perform_tool_action(step: ToolStep) -> str:
 
     if tool == "write":
         content = args.get("content", "")
+        _refuse_write_that_drops_definitions(file, content)  # checked before anything is written
         write_code_file(file, content.splitlines(keepends=True))
         return f"[WRITE] {file} written"
 
