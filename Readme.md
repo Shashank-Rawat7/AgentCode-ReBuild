@@ -2,9 +2,6 @@
 
 Agent Code is a browser-based code editor with an AI agent that plans and applies file changes (create, modify, delete) in a local workspace, and a Run button that executes code in a self-hosted [Piston](https://github.com/engineer-man/piston) sandbox.
 
-> Demo video (may not reflect the current version): [Google Drive](https://drive.google.com/drive/folders/1bqPaS2Cie13lI22dzSma5gW-o7jmXS8H?usp=sharing)
-
----
 
 ## Features
 
