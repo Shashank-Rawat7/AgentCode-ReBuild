@@ -7,4 +7,5 @@ requests==2.34.2
 httpx==0.28.1
 langgraph==1.2.15
 langchain-core==1.6.11
+groq==0.37.1            # pinned: langchain-groq declares no version range on this, and backend/models/groq_llm.py imports groq's exception classes directly
 langchain-groq==1.1.3
