@@ -23,6 +23,9 @@ RETRY_DELAY_SECONDS = 2
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}   # 429 is handled separately below
 DEFAULT_MAX_429_WAIT_SECONDS = 20      # longer suggested waits fail at once
 CHARS_PER_TOKEN_ESTIMATE = 4           # rough local estimate, used only when Groq reports nothing
+MAX_OUTPUT_TOKENS = 2048               # explicit completion-token ceiling (matches the observed
+                                        # account/tier default; see groq_llm.py chat() for context)
+REASONING_EFFORT = "low"               # GPT-OSS-only; cuts the reasoning-token share of the budget
 
 
 class LLMError(RuntimeError):
@@ -199,6 +202,8 @@ def chat(prompt: str) -> str:
         temperature=0,
         timeout=REQUEST_TIMEOUT_SECONDS,
         max_retries=0,  # retries are handled below, so the SDK adds none of its own
+        max_tokens=MAX_OUTPUT_TOKENS,   # explicit ceiling instead of an opaque account default
+        **({"reasoning_effort": REASONING_EFFORT} if "gpt-oss" in model else {}),  # GPT-OSS only
     )
 
     last_error = None

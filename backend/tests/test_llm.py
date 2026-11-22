@@ -96,6 +96,25 @@ def test_groq_model_env_overrides_default(fake_groq, monkeypatch):
     assert created[0].kwargs["model"] == "openai/gpt-oss-120b"
 
 
+def test_gpt_oss_model_receives_explicit_output_cap_and_low_reasoning_effort(fake_groq):
+    created = fake_groq(reply("ok"))
+    assert groq_llm.chat("hi") == "ok"
+    client = created[0]
+    assert client.kwargs["model"] == "openai/gpt-oss-20b"  # default; GPT-OSS family
+    assert client.kwargs["max_tokens"] == groq_llm.MAX_OUTPUT_TOKENS
+    assert client.kwargs["reasoning_effort"] == groq_llm.REASONING_EFFORT == "low"
+
+
+def test_non_gpt_oss_model_does_not_receive_reasoning_effort(fake_groq, monkeypatch):
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    created = fake_groq(reply("ok"))
+    assert groq_llm.chat("hi") == "ok"
+    client = created[0]
+    assert client.kwargs["model"] == "llama-3.3-70b-versatile"
+    assert client.kwargs["max_tokens"] == groq_llm.MAX_OUTPUT_TOKENS  # still applied, model-agnostic
+    assert "reasoning_effort" not in client.kwargs  # GPT-OSS-only param, correctly withheld
+
+
 def test_text_content_blocks_are_joined(fake_groq):
     fake_groq(AIMessage(content=[{"type": "text", "text": "[1, "}, {"type": "text", "text": "2]"}]))
     assert groq_llm.chat("hi") == "[1, 2]"
