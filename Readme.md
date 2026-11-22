@@ -15,6 +15,7 @@ Agent Code is a browser-based code editor with an AI agent that plans and applie
 - **Safety rails**:
   - every file operation (UI and agent) is confined to `codebase/`;
   - agent-written `.py` files that do not parse are refused before saving;
+  - if the planner's own output can't be parsed, it gets one bounded repair attempt (the parse error plus a size-capped snippet of the bad reply) before giving up with a clear error;
   - workflow and model failures are returned as errors instead of a false success.
 
 See [Verification](#verification) for what has been tested and how.
@@ -105,6 +106,7 @@ You can also run the backend and frontend directly, with Piston installed separa
 ### Optional: token usage and LangSmith tracing
 - **Token usage** is always logged by the backend. Each LLM call writes a line like `LLM usage purpose=generate_steps model=... input_tokens=... output_tokens=... total_tokens=... source=groq-reported`, and each `/run-task` request ends with a `Task LLM usage: calls=... total_tokens=...` summary. `source=groq-reported` means the numbers came from Groq; `source=local-estimate` (about 4 characters per token) is used only if Groq reports no usage.
 - **Rate limits (429):** the agent retries once only when Groq's suggested wait is short (`AGENTCODE_MAX_429_WAIT_SECONDS`, default 20); otherwise it fails at once with Groq's message.
+- **Output-token limit and reasoning effort (GPT-OSS models):** Groq calls set an explicit completion-token ceiling (`MAX_OUTPUT_TOKENS`, 2048) and, for GPT-OSS models specifically, `reasoning_effort="low"` -- both in `backend/models/groq_llm.py`, not environment variables. This exists because GPT-OSS models on Groq default to `reasoning_effort="medium"`, which can spend most of an unconfigured output budget on internal reasoning and return an empty response (`finish_reason=length`); lowering reasoning effort and capping output length leaves more of the budget for the actual response.
 - **Prompt-size guard:** `AGENTCODE_MAX_PROMPT_TOKENS` (default `0`, disabled). When set, prompts whose local estimate exceeds it are not sent.
 - **LangSmith tracing** is off by default. To see the graph, each node's inputs and outputs, and each LLM call in [LangSmith](https://smith.langchain.com), set in `backend/.env`: `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY=<your key>` and optionally `LANGSMITH_PROJECT=agentcode`, then restart the backend. Each task appears as a run named `agentcode_task`. Traces contain prompts and file contents, so only enable tracing for code you are happy to send to LangSmith.
 
@@ -112,7 +114,7 @@ You can also run the backend and frontend directly, with Piston installed separa
 
 ## Verification
 
-**Automated tests:** `101 passed, 2 skipped`. One skipped test needs permission to create symlinks on Windows; the other is the optional live Groq test (below). The tests cover:
+**Automated tests:** `106 passed, 2 skipped`. One skipped test needs permission to create symlinks on Windows; the other is the optional live Groq test (below). The tests cover:
 - workspace confinement for the UI endpoints and the agent's file helpers;
 - the `/execute` proxy and its error mapping;
 - Groq API errors, timeouts and empty responses, with a bounded retry;
@@ -121,6 +123,7 @@ You can also run the backend and frontend directly, with Piston installed separa
 - workflow error reporting;
 - refusal of an agent edit that would leave broken Python;
 - planner and developer parsing of typical model replies (fenced Python lists and JSON), through to the tool dispatcher;
+- the planner's bounded repair retry: if its first reply fails to parse, it gets exactly one retry with the parse error and a size-capped snippet of the bad reply, before falling back to a clear error;
 - the developer agent returning a planned `delete` step unchanged, without an LLM call, so it cannot be silently rewritten into a different tool.
 
 The model calls are replaced with test doubles, so these tests make no API calls. An optional live test makes one real Groq call; it is skipped unless enabled (from `backend/`, PowerShell: `$env:AGENTCODE_LIVE_GROQ = "1"; python -m pytest -q tests/test_live_groq.py`).
@@ -129,9 +132,10 @@ The model calls are replaced with test doubles, so these tests make no API calls
 
 | Check | Result |
 |---|---|
-| All 7 required Piston runtimes installed and verified by `piston-init` (python 3.12.0, javascript 18.15.0, typescript 5.0.3, java 15.0.2, csharp 6.12.0, c 10.2.0, cpp 10.2.0) | PASS |
+| All 7 required Piston runtimes installed and verified by `piston-init` (python 3.12.0, javascript 18.15.0, typescript 5.0.3, java 15.0.2, csharp 6.12.0, c 10.2.0, c++ 10.2.0) | PASS |
 | Backend, frontend and Piston integrated and reachable end-to-end through Docker Compose | PASS |
 | AI agent Create, through the UI, at root level and inside a nested folder — verified against the real filesystem, not just the API response | PASS |
+| AI agent Read, through the UI | PASS |
 | AI agent Modify, through the UI, at root level and inside a nested folder — verified against the real filesystem | PASS |
 | AI agent Delete, through the UI, at root level and inside a nested folder — verified against the real filesystem | PASS |
 | Run button, through the UI, for Python | PASS |
@@ -151,7 +155,9 @@ These are manual, single-attempt runs against a non-deterministic model: they sh
 | `validate_step_with_llm` | 3,393 |
 | **Task total** | **7,693** (6,863 input, 830 output) |
 
-This is a single run. It shows that usage logging works; it does not show any token reduction or a fix for 429 errors. The two codebase-aware calls (`generate_steps` and `validate_step_with_llm`) used most of the tokens, and the task total is close to the 8,000 tokens-per-minute limit we hit on Groq's free tier.
+This is a single run. It shows that usage logging works; no token reduction has been quantified from it. Separately, the merge-sort task described below -- which had previously failed from GPT-OSS reasoning-token exhaustion followed by a 429 -- now succeeds after the reasoning-effort/output-token change, but this one success does not establish that Groq 429 errors have been eliminated generally; they remain possible for larger or multi-step tasks. The two codebase-aware calls (`generate_steps` and `validate_step_with_llm`) used most of the tokens, and the task total is close to the 8,000 tokens-per-minute limit we hit on Groq's free tier.
+
+**Fresh-clone merge-sort run:** on an independent fresh clone (`D:\AgentCode`), a UI task asking the agent to write a merge sort implementation to `merge_sort.py` succeeded end to end: the agent generated the file, it was written to the workspace, and the generated code ran correctly through the Run button. This is qualitative confirmation that this task -- the same class of task that had previously failed during planning -- now completes; no token counts were recorded for this run, and it does not by itself quantify any reduction in token usage.
 
 ---
 
@@ -163,7 +169,7 @@ This is a single run. It shows that usage logging works; it does not show any to
 - **No stdin.** The Run panel shows only the output text, not the exit code or signal.
 - **No AI autocomplete.** The editor offers Monaco's built-in, non-AI suggestions only.
 - **Execution is request/response**, not streamed: output appears when the run finishes.
-- **Groq rate limits apply.** On the free tier, a task can hit HTTP 429 (tokens per minute). The agent retries once only when Groq suggests a short wait; otherwise it reports the error. The planner and developer still send full file contents, so larger tasks are the most likely to hit the limit.
+- **Groq rate limits apply.** On the free tier, a task can hit HTTP 429 (tokens per minute). The agent retries once only when Groq suggests a short wait; otherwise it reports the error. The planner and developer still send full file contents, so larger tasks are the most likely to hit the limit. The reasoning-effort and output-token configuration (see [Optional: token usage and LangSmith tracing](#optional-token-usage-and-langsmith-tracing) above) reduces how much of a typical single-step call's budget goes to internal reasoning, which lowers the chance of hitting this limit for an ordinary task -- it does not raise or remove Groq's TPM ceiling, and a large or multi-step task can still hit it.
 - **Long plans can fail.** No recursion limit is configured, so LangGraph's default limits how many developer steps a single task can run.
 - **Not yet verified end to end:**
   - the explorer's own folder, rename and delete actions, as distinct from the AI agent's file operations (endpoints covered by unit tests only);
