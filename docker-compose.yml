@@ -1,0 +1,68 @@
+volumes:
+  # Persists Piston's installed language packages (binaries/runtimes) across
+  # container restarts, so piston-init doesn't have to reinstall them every time.
+  # Mounted at /piston (PISTON_DATA_DIRECTORY's default), matching the official
+  # image's own default data path.
+  piston_packages:
+
+services:
+  piston:
+    image: ghcr.io/engineer-man/piston@sha256:2f66b7456189c4d713aa986d98eccd0b6ee16d26c7ec5f21b30e942756fd127a
+    restart: unless-stopped
+    volumes:
+      - piston_packages:/piston
+    tmpfs:
+      # Job execution scratch space does not need to persist; the official
+      # Piston README's own docker run example mounts this as tmpfs alongside
+      # a persistent /piston mount for packages.
+      - /piston/jobs
+    environment:
+      # Verbatim from the existing project README's own C++ guidance: the
+      # repo already documents that C++ compilation can exceed Piston's
+      # default compile timeout and that PISTON_LIMIT_OVERRIDES is the fix,
+      # with this exact example value.
+      - 'PISTON_LIMIT_OVERRIDES={"c++":{"compile_timeout":30000}}'
+    # Intentionally no "ports:" entry: Piston is reachable only as "piston:2000"
+    # on the internal Compose network, not from the host.
+    #
+    privileged: true
+    # Enabled: Piston's sandbox needs privileged mode on this host to isolate
+    # and execute submitted code. The official Piston README shows the
+    # container run both with and without --privileged in different
+    # sections, and also lists cgroup v2 as a host requirement; here, without
+    # --privileged, piston-init's install step and later /execute calls fail
+    # with a sandboxing/permission error.
+
+  piston-init:
+    build: ./piston-init
+    depends_on:
+      - piston
+    environment:
+      - PISTON_URL=http://piston:2000
+    # One-shot: installs the 6 required Piston packages (idempotently, skipping
+    # ones already installed), then verifies all 7 required language/version
+    # runtimes are present, then exits. Does not restart on its own.
+    restart: "no"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      piston-init:
+        condition: service_completed_successfully
+    environment:
+      - PISTON_EXECUTE_URL=http://piston:2000/api/v2/execute
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./codebase:/app/codebase
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"

@@ -51,6 +51,12 @@ def _target_file_context(filename: str) -> str:
 
 def validate_step_with_llm(state: DevState) -> DevState:
     step = state["current_step"]
+    if step.tool == "delete":
+        # "delete" takes no args and depends on nothing in the file's content --
+        # there is nothing for the validator to correct, and sending it through
+        # the LLM risks the model "correcting" it into a different (non-destructive)
+        # tool, silently turning an intended delete into a no-op.
+        return {"current_step": step}
     # Only the target file's contents are sent; other files are listed by name.
     # The planner (generate_steps) already saw the whole codebase.
     target_context = _target_file_context(step.file)

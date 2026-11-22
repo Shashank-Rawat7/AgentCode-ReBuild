@@ -136,6 +136,22 @@ def search_external(state: PlannerState) -> PlannerState:
     results = tavily_search(query)
     return {"external_results": results}
 
+def _strip_markdown_fence(text: str) -> str:
+    """Strip a single markdown code fence that wraps the ENTIRE response.
+
+    Supports ```json, ```python, and bare ``` fences, with LF or CRLF line
+    endings. Only removes a fence when both an opening fence (at the very
+    start) and a closing fence (at the very end) are present -- it never
+    strips a ``` sequence that appears inside the body of the response, so
+    a triple-backtick sequence inside generated file content is preserved.
+    """
+    stripped = text.strip()
+    opening = re.match(r"^```[a-zA-Z]*\r?\n", stripped)
+    closing = re.search(r"\r?\n```$", stripped)
+    if opening and closing and closing.start() >= opening.end():
+        return stripped[opening.end():closing.start()].strip()
+    return stripped
+
 def generate_steps(state: PlannerState) -> PlannerState:
     logger.info("[Node] generate_steps")
     external_results = state.get('external_results', [])
@@ -153,6 +169,18 @@ Generate a python list of steps , Each step must mention:
 - "args": a dict of arguments for the tool (e.g., code, line number, function name, etc.)
 
 "write" replaces the ENTIRE file. To change an existing file with "write", its "content" arg must be the complete updated file, including all existing code that the task does not ask to remove.
+
+Creating a new file is itself an actionable step: if the task asks you to create or save a file, that is enough information to act on, and you must produce a "write" step for it rather than deciding there is nothing to do.
+
+The "file" value may include a relative subdirectory path (e.g. "folder_name/example.py"), including a directory that already exists in the codebase. Naming it as part of "file" is sufficient when that directory is already present; you do not need a separate tool to create it first.
+
+The codebase shown above only lists top-level files and may not include files inside subdirectories, even ones the task describes as already existing -- trust the task's description of existing folders rather than requiring confirmation from the codebase listing, and do not treat writing the one requested file inside such a folder as creating an 'additional' file or directory.
+
+For a simple file-creation request, output exactly one "write" step containing the requested filename (with its subdirectory path, if any) and the complete file content. For example, given the task "Create a new file named notes.txt inside the existing folder docker_agent_smoke_test, containing the line 'hello'", the correct output is:
+
+[{{"file": "docker_agent_smoke_test/notes.txt", "tool": "write", "args": {{"content": "hello\\n"}}}}]
+
+Only output an empty list, [], when there is genuinely no actionable file operation in the task (for example, the task asks a question rather than requesting any file change) -- never because the requested path includes a subdirectory, or because no explicit "create directory" tool exists.
 
 Choose the file type and language that best fits the task. If the task involves web, use .html, .js, .css as needed. If the task is for Python, use .py. If the codebase is empty, create all necessary files from scratch.
 
@@ -173,12 +201,21 @@ If you cannot determine the steps, output an empty list: []
 
 """
     response = chat(prompt)
-    clean = re.sub(r"^```[a-zA-Z]*\n?", "", response).replace("```", "").strip()
+    clean = _strip_markdown_fence(response)
     try:
         steps_raw = ast.literal_eval(clean)
-    except Exception as e:
-        logger.error(f"Failed to parse steps: {e}\nRaw string was:\n{clean}")
-        steps_raw = []
+    except Exception as e_literal:
+        try:
+            steps_raw = json.loads(clean)
+        except Exception as e_json:
+            snippet = clean if len(clean) <= 500 else clean[:500] + "... [truncated]"
+            logger.error(
+                f"Failed to parse planner steps. ast.literal_eval error: {e_literal}; "
+                f"json.loads error: {e_json}\nRaw string was:\n{snippet}"
+            )
+            raise RuntimeError(
+                f"Could not parse planner output as steps (ast.literal_eval: {e_literal}; json.loads: {e_json})"
+            ) from e_json
 
     steps: List[ToolStep] = []
     for item in steps_raw:
@@ -186,6 +223,13 @@ If you cannot determine the steps, output an empty list: []
             steps.append(ToolStep(**item))
         except ValidationError as e:
             raise RuntimeError(f"Step validation failed: {e}")
+    if not steps:
+        logger.warning(
+            "Planner generated zero steps. "
+            "Parsed items: %d. Raw model response: %s",
+            len(steps_raw),
+            clean[:2000],
+        )
     logger.info(f"Generated {len(steps)} steps.")
     return {"steps": steps}
 

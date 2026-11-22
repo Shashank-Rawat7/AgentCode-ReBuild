@@ -269,3 +269,169 @@ def test_workflow_reports_developer_error_when_a_write_would_drop_code(workspace
     assert result["stage"] == "developer"
     assert "would remove existing definitions: add" in result["error"]
     assert target.read_text(encoding="utf-8") == ORIGINAL
+
+# --- generate_steps() parser reliability ------------------------------------------
+# Regression coverage for the merge-sort /run-task failure: a model reply whose
+# generated code contains unescaped quotes broke ast.literal_eval and was silently
+# swallowed into an empty step list, which graph.py then misreported as
+# "Planner produced no steps" even though the model had produced a full plan.
+#
+# Fixtures build the intended Python VALUE first (with real newlines/quotes in the
+# content), then serialize it with json.dumps() / repr() -- the same direction a
+# real LLM reply takes -- instead of hand-typing escape sequences in a non-raw
+# string literal, which silently turns an intended "\n" escape into an actual
+# embedded newline and produces an invalid fixture.
+
+
+def test_generate_steps_still_parses_existing_python_literal_reply(monkeypatch):
+    value = [{"file": "a.py", "tool": "write", "args": {"content": "x\n"}}]
+    monkeypatch.setattr(planner, "chat", lambda prompt: repr(value))
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert [s.model_dump() for s in result["steps"]] == value
+
+
+def test_generate_steps_parses_valid_json_with_multiline_code(monkeypatch):
+    value = [{"file": "b.py", "tool": "write", "args": {"content": "def f():\n    return 1\n"}}]
+    monkeypatch.setattr(planner, "chat", lambda prompt: json.dumps(value))
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert result["steps"][0].args["content"] == "def f():\n    return 1\n"
+
+
+def test_generate_steps_parses_docstring_and_print_with_escaped_quotes(monkeypatch):
+    content = 'def f():\n    """doc"""\n    print("hi")\n'
+    value = [{"file": "c.py", "tool": "write", "args": {"content": content}}]
+    monkeypatch.setattr(planner, "chat", lambda prompt: json.dumps(value))
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert result["steps"][0].args["content"] == content
+
+
+def test_generate_steps_preserves_triple_backtick_inside_fenced_content(monkeypatch):
+    content = "Example:\n```\ncode here\n```\n"
+    value = [{"file": "d.md", "tool": "write", "args": {"content": content}}]
+    reply = "```json\n" + json.dumps(value) + "\n```"
+    monkeypatch.setattr(planner, "chat", lambda prompt: reply)
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert result["steps"][0].args["content"] == content
+
+
+def test_generate_steps_json_fallback_handles_true_false_null(monkeypatch):
+    # Not a valid Python literal (bare true/false/null), but valid JSON.
+    reply = '[{"file": "e.py", "tool": "write", "args": {"content": "x", "overwrite": true}}]'
+    monkeypatch.setattr(planner, "chat", lambda prompt: reply)
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert result["steps"][0].args == {"content": "x", "overwrite": True}
+
+
+def _malformed_merge_sort_reply() -> str:
+    """Builds a realistic malformed planner reply: newlines are correctly escaped
+    (as a real LLM reply typically gets right via JSON encoding), but the
+    docstring's own quotes are left unescaped -- the actual mistake that caused
+    the reported /run-task merge-sort failure.
+    """
+    content = 'def merge_sort(arr):\n    """Sort a list."""\n    return arr[:len(arr)//2]\n'
+    well_formed = json.dumps([{"file": "shark.py", "tool": "write", "args": {"content": content}}])
+    # Un-escape only the embedded quotes (leave the \n newline escapes intact),
+    # simulating the model forgetting to escape the docstring's own quotes.
+    return well_formed.replace('\\"', '"')
+
+
+def test_generate_steps_raises_on_unescaped_quote_in_generated_code(monkeypatch):
+    # Reproduces the merge-sort failure: an unescaped """ breaks the string boundary
+    # and exposes the leaked code's own brackets to the parser.
+    monkeypatch.setattr(planner, "chat", lambda prompt: _malformed_merge_sort_reply())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert "Could not parse planner output as steps" in str(excinfo.value)
+
+
+def test_generate_steps_genuinely_empty_list_still_yields_zero_steps(monkeypatch):
+    monkeypatch.setattr(planner, "chat", lambda prompt: "[]")
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert result["steps"] == []
+
+
+def test_generate_steps_parses_crlf_fenced_reply(monkeypatch):
+    value = [{"file": "f.py", "tool": "write", "args": {"content": "y\n"}}]
+    reply = "```python\r\n" + repr(value) + "\r\n```"
+    monkeypatch.setattr(planner, "chat", lambda prompt: reply)
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert result["steps"][0].file == "f.py"
+    assert result["steps"][0].args["content"] == "y\n"
+
+
+def test_full_planner_subgraph_parse_failure_is_distinguishable_from_no_steps(monkeypatch):
+    """Graph-level check: a parsing failure deep in generate_steps() must surface as
+    a distinguishable error through run_planner_subgraph -> graph.py's planner_node,
+    never as the generic "Planner produced no steps" (reserved for a genuine [] reply).
+    """
+    from langgraph_app import graph as main_graph
+
+    fake = routed_chat({
+        "Enhance this task": "Create shark.py with merge sort.",
+        "web search query": "python merge sort",
+        "should we fetch external docs": "INTERNAL",
+        "software planning agent": _malformed_merge_sort_reply(),
+    })
+    monkeypatch.setattr(planner, "chat", fake)
+
+    result = main_graph.setup_graph().invoke({"task": "create shark.py with merge sort"})
+
+    assert result["status"] == "error"
+    assert result["stage"] == "planner"
+    assert result["error"] != "Planner produced no steps"
+    assert "Could not parse planner output as steps" in result["error"]
+
+
+
+# --- validate_step_with_llm() must not rewrite a planned "delete" step ------------
+# Regression coverage: "delete" takes no args and nothing in the file's content can
+# inform a "correction", so sending it through the LLM validator at all was pure risk
+# -- it previously let the model silently turn a planned delete into a write, leaving
+# the file on disk while the API still reported success.
+
+
+def test_validate_step_with_llm_returns_delete_unchanged_without_calling_chat(monkeypatch):
+    def fail_if_called(prompt):
+        pytest.fail(f"chat() must not be called for a delete step; got prompt: {prompt[:80]!r}")
+
+    monkeypatch.setattr(developer, "chat", fail_if_called)
+
+    original = developer.ToolStep(file="to_delete.txt", tool="delete", args={})
+    result = developer.validate_step_with_llm({"current_step": original})
+
+    assert result["current_step"] is original
+    assert result["current_step"].file == "to_delete.txt"
+    assert result["current_step"].tool == "delete"
+    assert result["current_step"].args == {}
+
+
+def test_delete_step_executes_without_validator_rewriting_it(workspace, monkeypatch):
+    (workspace / "to_delete.txt").write_text("x\n", encoding="utf-8")
+
+    def fail_if_called(prompt):
+        pytest.fail("chat() must not be called for a delete step")
+
+    monkeypatch.setattr(developer, "chat", fail_if_called)
+
+    logs = developer.run_developer_subgraph([
+        {"file": "to_delete.txt", "tool": "delete", "args": {}}
+    ])
+
+    assert logs == ["[DELETE] to_delete.txt removed"]
+    assert not (workspace / "to_delete.txt").exists()

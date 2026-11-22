@@ -1,3 +1,4 @@
+import os
 import httpx
 from fastapi import HTTPException
 from pydantic import Field
@@ -29,7 +30,7 @@ app.add_middleware(
 
 
 app.include_router(file_ops_router)
-PISTON_EXECUTE_URL = "http://127.0.0.1:2000/api/v2/execute"
+PISTON_EXECUTE_URL = os.getenv("PISTON_EXECUTE_URL", "http://127.0.0.1:2000/api/v2/execute")
 
 ALLOWED_RUNTIMES = {
     "python": {"3.12.0"},
