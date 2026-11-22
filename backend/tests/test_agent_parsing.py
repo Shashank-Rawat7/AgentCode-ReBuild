@@ -356,6 +356,74 @@ def test_generate_steps_raises_on_unescaped_quote_in_generated_code(monkeypatch)
     assert "Could not parse planner output as steps" in str(excinfo.value)
 
 
+# --- One bounded repair attempt when the planner output fails to parse ----------
+# Regression coverage for the real /run-task merge-sort failure: the model left a
+# docstring\'s quotes unescaped, generate_steps() correctly raised (proven above),
+# but the task still failed outright. These tests cover the recovery path added on
+# top of that existing, still-strict parsing: exactly one extra chat() call, with
+# the specific parse error and a size-capped snippet of the malformed reply -- never
+# the full reply unconditionally -- and the original descriptive RuntimeError is
+# still raised, unchanged, if the repair attempt also fails to parse.
+
+
+def test_generate_steps_repairs_malformed_reply_on_one_retry(monkeypatch):
+    calls = []
+    valid_value = [{"file": "merge_sort.py", "tool": "write", "args": {"content": "def f(): pass\n"}}]
+
+    def fake_chat(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return _malformed_merge_sort_reply()
+        return json.dumps(valid_value)
+
+    monkeypatch.setattr(planner, "chat", fake_chat)
+
+    result = planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert len(calls) == 2
+    assert result["steps"][0].file == "merge_sort.py"
+    assert result["steps"][0].args["content"] == "def f(): pass\n"
+    # The repair call must carry the specific parse error, not a blind retry.
+    assert "could not be parsed" in calls[1].lower()
+    assert "ast.literal_eval" in calls[1] and "json.loads" in calls[1]
+
+
+def test_generate_steps_raises_after_repair_attempt_also_fails(monkeypatch):
+    calls = []
+
+    def fake_chat(prompt):
+        calls.append(prompt)
+        return _malformed_merge_sort_reply()
+
+    monkeypatch.setattr(planner, "chat", fake_chat)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert len(calls) == 2
+    assert "Could not parse planner output as steps" in str(excinfo.value)
+
+
+def test_repair_prompt_bounds_the_malformed_snippet_size(monkeypatch):
+    huge_malformed = "[" + "x" * (planner.REPAIR_SNIPPET_MAX_CHARS * 3)  # invalid and huge
+    calls = []
+
+    def fake_chat(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return huge_malformed
+        return "[]"
+
+    monkeypatch.setattr(planner, "chat", fake_chat)
+
+    planner.generate_steps({"codebase_summary": "", "enhanced_task": "t"})
+
+    assert len(calls) == 2
+    repair_prompt = calls[1]
+    assert len(repair_prompt) < len(huge_malformed)
+    assert "truncated" in repair_prompt.lower()
+
+
 def test_generate_steps_genuinely_empty_list_still_yields_zero_steps(monkeypatch):
     monkeypatch.setattr(planner, "chat", lambda prompt: "[]")
 
@@ -387,6 +455,9 @@ def test_full_planner_subgraph_parse_failure_is_distinguishable_from_no_steps(mo
         "web search query": "python merge sort",
         "should we fetch external docs": "INTERNAL",
         "software planning agent": _malformed_merge_sort_reply(),
+        # The repair attempt also gets the same malformed reply, so this test still
+        # exercises the genuine, final-failure path end to end through the graph.
+        "could not be parsed as a valid Python list of steps": _malformed_merge_sort_reply(),
     })
     monkeypatch.setattr(planner, "chat", fake)
 

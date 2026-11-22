@@ -152,6 +152,46 @@ def _strip_markdown_fence(text: str) -> str:
         return stripped[opening.end():closing.start()].strip()
     return stripped
 
+
+# One bounded repair attempt: cap how much of a malformed reply is sent back to
+# the model, so a huge malformed response is never forwarded unconditionally.
+REPAIR_SNIPPET_MAX_CHARS = 3000
+
+
+def _parse_steps_text(clean: str):
+    """Try ast.literal_eval then json.loads on an already-fence-stripped reply.
+
+    Returns (steps_raw, None) on success, or (None, error_message) on failure.
+    Never raises -- callers decide what to do with a failure.
+    """
+    try:
+        return ast.literal_eval(clean), None
+    except Exception as e_literal:
+        try:
+            return json.loads(clean), None
+        except Exception as e_json:
+            return None, f"ast.literal_eval: {e_literal}; json.loads: {e_json}"
+
+
+def _build_repair_prompt(malformed: str, parse_error: str) -> str:
+    """One bounded repair prompt: the specific parse error plus a size-capped
+    snippet of the malformed reply -- never the full reply unconditionally."""
+    if len(malformed) > REPAIR_SNIPPET_MAX_CHARS:
+        snippet = malformed[:REPAIR_SNIPPET_MAX_CHARS] + f"... [truncated, {len(malformed)} characters total]"
+    else:
+        snippet = malformed
+    return (
+        "Your previous reply could not be parsed as a valid Python list of steps.\n"
+        f"Parse error: {parse_error}\n\n"
+        "Your previous reply was:\n"
+        f"{snippet}\n\n"
+        "Return ONLY the corrected, complete, valid Python list of steps -- no explanations, "
+        "no markdown fences, no extra text. Every string value (especially \"content\") must "
+        "have its embedded double quotes, triple quotes, backslashes and newlines properly "
+        "escaped so the overall list is valid Python/JSON."
+    )
+
+
 def generate_steps(state: PlannerState) -> PlannerState:
     logger.info("[Node] generate_steps")
     external_results = state.get('external_results', [])
@@ -180,6 +220,10 @@ For a simple file-creation request, output exactly one "write" step containing t
 
 [{{"file": "docker_agent_smoke_test/notes.txt", "tool": "write", "args": {{"content": "hello\\n"}}}}]
 
+Every string value inside "args" -- especially "content" -- must be valid, properly escaped text, which matters most for multi-line code: escape every embedded double quote ("), including the three double quotes that open or close a Python docstring, every backslash (\\), and every newline as \\n, so the whole list stays valid Python/JSON. For example, given the task "Create merge_sort.py implementing merge sort in Python, with a short docstring", a correctly escaped output looks like:
+
+[{{"file": "merge_sort.py", "tool": "write", "args": {{"content": "def merge_sort(arr):\\n    \\"\\"\\"Sort a list using merge sort.\\"\\"\\"\\n    if len(arr) <= 1:\\n        return arr\\n    mid = len(arr) // 2\\n    left = merge_sort(arr[:mid])\\n    right = merge_sort(arr[mid:])\\n    print('merged \\"left\\" and \\"right\\"')\\n    return left + right\\n"}}}}]
+
 Only output an empty list, [], when there is genuinely no actionable file operation in the task (for example, the task asks a question rather than requesting any file change) -- never because the requested path includes a subdirectory, or because no explicit "create directory" tool exists.
 
 Choose the file type and language that best fits the task. If the task involves web, use .html, .js, .css as needed. If the task is for Python, use .py. If the codebase is empty, create all necessary files from scratch.
@@ -202,20 +246,29 @@ If you cannot determine the steps, output an empty list: []
 """
     response = chat(prompt)
     clean = _strip_markdown_fence(response)
-    try:
-        steps_raw = ast.literal_eval(clean)
-    except Exception as e_literal:
-        try:
-            steps_raw = json.loads(clean)
-        except Exception as e_json:
-            snippet = clean if len(clean) <= 500 else clean[:500] + "... [truncated]"
+    steps_raw, parse_error = _parse_steps_text(clean)
+
+    if parse_error is not None:
+        snippet = clean if len(clean) <= 500 else clean[:500] + "... [truncated]"
+        logger.warning(
+            "Planner output failed to parse (%s); attempting one bounded repair call.\n"
+            "Raw string was:\n%s",
+            parse_error, snippet,
+        )
+        repair_prompt = _build_repair_prompt(clean, parse_error)
+        repaired_response = chat(repair_prompt)
+        repaired_clean = _strip_markdown_fence(repaired_response)
+        steps_raw, parse_error = _parse_steps_text(repaired_clean)
+        if parse_error is not None:
+            final_snippet = repaired_clean if len(repaired_clean) <= 500 else repaired_clean[:500] + "... [truncated]"
             logger.error(
-                f"Failed to parse planner steps. ast.literal_eval error: {e_literal}; "
-                f"json.loads error: {e_json}\nRaw string was:\n{snippet}"
+                "Repair attempt also failed to parse planner steps. %s\nRaw string was:\n%s",
+                parse_error, final_snippet,
             )
             raise RuntimeError(
-                f"Could not parse planner output as steps (ast.literal_eval: {e_literal}; json.loads: {e_json})"
-            ) from e_json
+                f"Could not parse planner output as steps ({parse_error})"
+            )
+        logger.info("Repair attempt succeeded; using the corrected planner output.")
 
     steps: List[ToolStep] = []
     for item in steps_raw:
